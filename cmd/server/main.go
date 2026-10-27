@@ -33,6 +33,30 @@ import (
 // appVersion 网关版本（fork 版：面板 + 任务体系），透出到 /panel/api/overview。
 const appVersion = "1.13.0-panel"
 
+// preflightWritable 启动期可写自检（防"静默失忆"）。
+//
+// 为什么需要：state.json / usage.json / request-logs 的落盘失败都是**只打节流 WARN、
+// 不影响服务**的设计（服务不能因为磁盘问题拒绝对外服务），于是"进程照跑、但冷却/余额/
+// 用量/出账全部不进磁盘"可以静默持续很久——重启后这些状态直接蒸发，而日志里每隔若干次
+// 才有一行 WARN，很容易漏看。实测踩到的成因：Windows 低完整性（Low IL）进程无法写入
+// 中完整性（未打标签）目录——二进制在工作区里重建后继承了低完整性标签，启动出的进程即
+// 低 IL，于是 ./data/*.tmp 全部 Access is denied，而读路径一切正常。
+//
+// 做法：启动时在目录里写一个探针文件并删除，失败就打两条 ERR（第二条给后果与常见成因）。
+// 非致命：写不进磁盘仍然可以服务请求，运维据此判断要不要先修权限再跑。
+func preflightWritable(label, dir string) {
+	if dir == "" {
+		dir = "."
+	}
+	probe := filepath.Join(dir, ".wb2a-write-probe")
+	if err := os.WriteFile(probe, []byte("ok"), 0o600); err != nil {
+		log.Printf("ERR: [server] %s 目录不可写: %s: %v", label, dir, err)
+		log.Printf("ERR: [server] %s 落盘将全部失败（进程仍可服务请求，但重启会丢冷却/余额/用量）；常见成因：只读挂载、沙箱或低完整性进程（Windows Low IL 进程写中完整性目录）、目录权限被改", label)
+		return
+	}
+	_ = os.Remove(probe)
+}
+
 // usagePathFor 由 state 文件路径推出用量文件路径：同目录、文件名 usage.json。
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
 func usagePathFor(stateFile string) string { return stateSibling(stateFile, "usage.json") }
@@ -247,6 +271,9 @@ func main() {
 		SanitizeFingerprints: cfg.Features.SanitizeBlacklistFingerprints,
 		RecordClientInfo:     cfg.Logging.RequestClientInfo,
 	})
+	// 启动期可写自检：state/auth 目录写不进时，落盘会静默失败（见 preflightWritable）。
+	preflightWritable("state", filepath.Dir(cfg.StateFile))
+	preflightWritable("auth", cfg.AuthDir)
 	// 用量记录器：与 state 文件同目录，随 state_file 配置一起搬移。
 	// datapath 由 state 文件路径推出，避免再加一个配置项。
 	usagePath := usagePathFor(cfg.StateFile)
