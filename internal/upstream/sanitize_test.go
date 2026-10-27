@@ -78,7 +78,58 @@ func TestUpstreamErrorCodeRewritten(t *testing.T) {
 	}
 }
 
-// 回归：工具调用消息的 content 常为 null，而旧版 sanitizeMessages 在 content 缺失时
+// DeepSeek Harness 指纹 #1（harness identity，47 B）：上游对 system prompt 开场白
+// 逐字匹配（HTTP 400 + code 11-128）。回归用例：passthrough 模式下这条原文直发上游，
+// 客户端（deepseek-harness）每次请求都带着它 → 每天首次请求必撞墙。
+func TestHarnessIdentityRewritten(t *testing.T) {
+	in := "You are an AI agent powered by DeepSeek Harness."
+	out := sanitizeText(in)
+	if strings.Contains(strings.ToLower(out), "you are an ai agent powered by deepseek harness") {
+		t.Errorf("harness identity not rewritten: %q", out)
+	}
+	if !strings.Contains(out, "DeepSeek Harness") {
+		t.Errorf("harness name should be preserved (only one word changes): %q", out)
+	}
+}
+
+// 小写形态同样必须改写：上游匹配**大小写不敏感**（实测全小写同样 400），
+// 而字面 ReplaceAll 区分大小写——指纹被 agent 抄进工具参数/代码时正是小写形态。
+func TestHarnessIdentityLowercaseRewritten(t *testing.T) {
+	in := "you are an ai agent powered by deepseek harness"
+	out := sanitizeText(in)
+	if strings.Contains(strings.ToLower(out), "powered by deepseek harness") {
+		t.Errorf("lowercase harness identity not rewritten: %q", out)
+	}
+}
+
+// DeepSeek Harness 指纹 #2（Web GUI 定向段，221 B 整串逐字命中）。
+// 回归用例：两句单独放行、拼起来才拦（上游是长串匹配），故两处各改一个词保持断链。
+func TestHarnessWebSurfaceRewritten(t *testing.T) {
+	in := `You are interacting with the user through the DeepSeek Harness Web GUI whose URL the runtime context names. When the user refers to "this page", "this GUI", or "this app" without naming another target, they mean this GUI.`
+	out := sanitizeText(in)
+	if strings.Contains(out, "without naming another target, they mean this GUI.") {
+		t.Errorf("web-surface fingerprint tail not rewritten: %q", out)
+	}
+	if strings.Contains(out, "through the DeepSeek Harness Web GUI") {
+		t.Errorf("web-surface fingerprint head not rewritten: %q", out)
+	}
+	// 语义与结构保留：两句都还在，只是各改了一个词。
+	if !strings.Contains(out, "via the DeepSeek Harness Web GUI") ||
+		!strings.Contains(out, `"this page", "this GUI", or "this app"`) {
+		t.Errorf("web-surface semantics should be preserved: %q", out)
+	}
+}
+
+// 预检命中但无完整指纹（只是提到产品名）→ 文本必须逐字节不变：
+// "DeepSeek Harness" 是这两个指纹的预检标记，误报不得改写用户正文。
+func TestHarnessMentionOnlyUntouched(t *testing.T) {
+	in := "The project name is DeepSeek Harness and it runs locally."
+	if out := sanitizeText(in); out != in {
+		t.Errorf("mention-only text must stay byte-identical: got %q want %q", out, in)
+	}
+}
+
+// // 回归：工具调用消息的 content 常为 null，而旧版 sanitizeMessages 在 content 缺失时
 // 直接 continue，整条消息连 tool_calls 一起被跳过 → arguments 里的被拦字符串原样漏出。
 func TestToolCallArgumentsSanitized(t *testing.T) {
 	msgs := []any{

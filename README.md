@@ -53,6 +53,35 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 > ⚠️ 合规须知：本项目是**非官方**网关，使用 CodeBuddy 账号作为上游，**仅限本人授权账号、本机 / 私有环境测试**。详细边界见[安全与合规](#安全与合规)。
 
+## 📱 一体化 APK：本地网关 + Agent
+
+`android/` 是一个**自包含安卓 App**（Kotlin + Jetpack Compose + Material 3）：
+
+- **内置网关**：把本仓库的 Go 服务端交叉编译进 APK（`libwb2api.so`，arm64-v8a / x86_64），
+  App 一键启动，监听 `127.0.0.1`，账号池、签到、任务、请求日志全部在手机内完成，**无需另开服务器**；
+- **原生 Agent**：流式对话、多会话本地持久化、模型选择、系统提示词预设，可选「手机操作」
+  （无障碍读屏 / 点击 / 输入 / 滚动 / 返回，由模型输出工具指令、App 执行后回灌）；
+- **管理面板**：总览 / 账号 / 任务 / 日志 / 设置（服务器配置、用量、套餐、模型探测、校园券码）。
+
+底部导航：总览 · 账号 · 助手 · 任务 · 日志 · 设置；也支持连接已有的远程 `workbuddy2api` 实例，
+或进入「演示模式」离线浏览界面。
+
+### 📸 界面展示
+
+| 总览 | 助手 · DSH 内核 |
+|:---:|:---:|
+| <img src="android/screenshots/overview.jpg" width="300" alt="App 总览：账号池状态、剩余积分、快捷操作、账号健康、最近日志"> | <img src="android/screenshots/assistant-dsh.jpg" width="300" alt="App 助手 · DSH 内核：独立进程运行完整 DeepSeek Harness Agent"> |
+| 账号池状态 / 剩余积分 / 快捷操作 / 账号健康 / 最近日志 | 内嵌 DeepSeek Harness 独立进程，完整 Agent 会话与工具 |
+
+```bash
+pwsh android/build_gateway.ps1     # 交叉编译 Go 网关（需 NDK）
+cd android && gradle assembleRelease
+# 产物：android/app/build/outputs/apk/release/app-release.apk
+```
+
+首次打开点「一键启动本地网关」，再到「账号 → 添加账号」完成 OAuth 即可使用；
+详见 [android/README.md](android/README.md)。
+
 ## 核心能力
 
 | 能力 | 说明 |
@@ -363,6 +392,9 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `logging.request_archive_enabled` | `true` | 请求元数据 JSONL 归档开关；不记录提示词、响应正文或 Authorization |
 | `logging.request_retention_days` | `7` | 请求归档保留天数；超期文件在启动和周期清理时删除 |
 | `logging.request_archive_max_mb` | `100` | 请求归档总容量上限（MiB）；超限优先删除最旧文件 |
+| `logging.content_block_dump_enabled` | `true` | 内容拦截取证落盘开关：命中 11-128 内容防火墙时，把**出站请求体**与上游响应体写进 `<state 同目录>/content-blocks/`（含提示词原文，仅本地磁盘），供 `cmd/fingerprint-probe` 定位未知指纹；改动需重启 |
+| `logging.content_block_dump_max_mb` | `8` | 单份取证落盘体上限（MiB）；超限按 rune 边界截断并置 `truncated=true` |
+| `logging.content_block_dump_keep` | `20` | 取证落盘目录保留份数；超出按 mtime 删除最旧 |
 | `cooldown.soft_rate` | `600s` | 软限流（429 / 限流文案）冷却基数；同一账号连续触发按 2 倍指数退避 |
 | `cooldown.soft_rate_max` | `2h` | 软冷却指数退避封顶 |
 | `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点签到 + 余额查询解冻。空数组 / `null` = 未配置回落默认（不是禁用） |
@@ -441,6 +473,18 @@ curl -s http://localhost:7863/v1/chat/completions \
 - 触发降级后持续到**次日 00:00 CST**（Asia/Shanghai）重置；降级期内 `passthrough` 请求直达中性提示词，不再先撞 400
 - 降级状态是**进程内存态**，重启清零
 - 内容问题非账号问题：`ErrContentBlocked` 不罚账号（无冷却 / 熔断 / 计错），由网关降级重试消化
+
+#### 指纹取证与词表扩充（发现新指纹的唯一可靠路径）
+
+上游是**逐字精确匹配**（非语义审核），所以"猜指纹"必然低效：必须拿到被拦的那一份请求体才能定位。链路如下：
+
+1. 拦下的请求体自动落盘：`ErrContentBlocked` 时把**出站请求体**与上游响应体写进 `<state 同目录>/content-blocks/content-block-<时间>-<上游 requestId>.json`（`logging.content_block_dump_enabled`，缺省开、单份 8 MiB 上限、目录保留 20 份）。落盘失败只打 WARN，不影响请求处理；内容含提示词原文，仅停在本机磁盘。
+2. 二分定位：`go run ./cmd/fingerprint-probe -body-file <落盘体> -bisect` —— 工具直连上游（不经网关，不污染降级状态），把 `system` / `developer` 文本按块 → 行 → 句递归试打，直到锁定**最小触发子串**。探针出站仍走 `prepareBody` 的脱敏，因此命中的必然是词表还没覆盖的**新**指纹。
+3. 收词表：把子串按既有纪律加进 `internal/upstream/sanitize.go` 的 `sanitizeRewrites`（模板句只改一个词、语义不变；特征串同时加进 `sanitizeFeatures` 预检），并在 `sanitize_test.go` 补回归用例。
+
+探针还可脱离落盘体单独使用：`-system-file <文本文件>`（整段试打 / 配合 `-bisect`）、`-list`（列账号）、`-sanitize=false`（观察已知指纹的原始形态）。
+
+定位到具体指纹前不要改 `prompt.mode`：把 `passthrough` 换成 `custom` 确实能一次性消除该类 400，但代价是客户端 system 全丢（等于把"偶发降级"变成"永久降级"）。
 
 ### 原生工具调用标记还原
 

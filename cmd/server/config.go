@@ -42,6 +42,18 @@ type Config struct {
 		// 关掉。关闭后 Event.ClientIP/UserAgent 保持为空，归档里不出现该字段。
 		// 热生效（经 livecfg 快照），无需重启。
 		RequestClientInfo bool `json:"request_client_info"`
+		// ContentBlockDumpEnabled 内容拦截取证落盘开关，缺省 true。
+		//
+		// ErrContentBlocked（HTTP 400 + 11-128 审核文案）时把**出站请求体**与上游
+		// 响应体落一份到 <state 同目录>/content-blocks/，供 cmd/fingerprint-probe
+		// 二分定位"哪句话被上游逐字指纹拦了"——没有它，sanitize 词表只能靠猜。
+		// 内容含用户提示词原文（仅本地磁盘、只在该类拦截时写、目录 GC 保留最近 N 份），
+		// 介意隐私的部署可显式关闭。装配期读取，改动需重启。
+		ContentBlockDumpEnabled bool `json:"content_block_dump_enabled"`
+		// ContentBlockDumpMaxMB 单份落盘体上限（MiB），缺省 8；<=0 回落默认。
+		ContentBlockDumpMaxMB int `json:"content_block_dump_max_mb"`
+		// ContentBlockDumpKeep 目录内保留份数，缺省 20；<=0 回落默认。
+		ContentBlockDumpKeep int `json:"content_block_dump_keep"`
 	} `json:"logging"`
 
 	Server struct {
@@ -248,6 +260,11 @@ func Default() *Config {
 	// 缺省 true 靠显式赋值实现（同 Schedule 开关）：JSON 里键缺席时字段保留此值，
 	// 只有显式 false 才关闭来源记录。
 	c.Logging.RequestClientInfo = true
+	// 内容拦截取证落盘：缺省开（P1 配套）——只在 11-128 拦截这种罕见事件写盘，
+	// 关掉等于放弃定位未知指纹的唯一线索。
+	c.Logging.ContentBlockDumpEnabled = true
+	c.Logging.ContentBlockDumpMaxMB = 8
+	c.Logging.ContentBlockDumpKeep = 20
 	c.Schedule.CheckinHours = []int{9, 21}
 	c.Schedule.TravelHours = []int{9, 21}
 	c.Schedule.ActivityHours = []int{10}

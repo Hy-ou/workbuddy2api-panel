@@ -74,6 +74,16 @@ type Config struct {
 	// 来自 logging.request_client_info（缺省 true）；关闭时 reqlog 事件的来源字段
 	// 保持为空，归档与面板都不出现来源信息。
 	RecordClientInfo bool
+
+	// ContentBlockDumpDir 内容拦截取证落盘目录（空 = 关闭）。来自
+	// logging.content_block_dump_enabled（缺省 true）+ state 文件同目录的
+	// content-blocks/。见 contentblock_dump.go：ErrContentBlocked 时把出站请求体
+	// 与上游响应体落一份，供 cmd/fingerprint-probe 二分定位未知指纹。
+	ContentBlockDumpDir string
+	// ContentBlockDumpMaxBytes 单文件上限（<=0 回落 8 MiB）。
+	ContentBlockDumpMaxBytes int64
+	// ContentBlockDumpKeep 目录内保留个数（<=0 回落 20）。
+	ContentBlockDumpKeep int
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -861,6 +871,12 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			} else {
 				kind = upstream.Classify(status, string(respBody))
 				uerr = &upstream.Error{Kind: kind, Status: status, Msg: string(respBody)}
+			}
+			// 内容拦截取证落盘（P1 配套，见 contentblock_dump.go）：命中的出站请求体
+			// 与上游响应体各落一份，供 cmd/fingerprint-probe 二分定位未知指纹。
+			// 位置在降级分支之前：首次（未降级）那份带着客户端原始 system，最有价值。
+			if kind == upstream.ErrContentBlocked {
+				h.dumpContentBlock(acct, bareModel, st.requestID, degradedApplied, body, respBody, status)
 			}
 			// 内容拦截误报（passthrough/append 模式首遇）：判定为 system 指纹误报，
 			// 触发降级到次日 00:00 CST，换 Degraded 中性提示词同请求内重试（append

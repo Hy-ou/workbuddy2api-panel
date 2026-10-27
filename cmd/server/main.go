@@ -37,6 +37,15 @@ const appVersion = "1.13.0-panel"
 // 这样 config 里改 state_file 时用量数据跟着走，不需要额外配置项。
 func usagePathFor(stateFile string) string { return stateSibling(stateFile, "usage.json") }
 
+// contentBlockDumpDir 内容拦截取证落盘目录：与 state 文件同级的 content-blocks/。
+// 开关关闭时返回空串（handler 见空串即跳过落盘，不建目录）。
+func contentBlockDumpDir(cfg *Config) string {
+	if !cfg.Logging.ContentBlockDumpEnabled {
+		return ""
+	}
+	return stateSibling(cfg.StateFile, "content-blocks")
+}
+
 // stateSibling 返回与 state 文件同目录的指定文件名路径（相对路径场景回落当前目录）。
 // usage.json（用量记录）与 output_probes.json（模型上限探测）共用本规则。
 func stateSibling(stateFile, name string) string {
@@ -310,6 +319,11 @@ func main() {
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
 		GlobalEnabled: cfg.Global.Enabled,
+		// 内容拦截取证落盘目录（contentblock_dump.go）：与 state 文件同级，
+		// logging.content_block_dump_enabled=false 时留空 = 关闭。
+		ContentBlockDumpDir:      contentBlockDumpDir(cfg),
+		ContentBlockDumpMaxBytes: int64(cfg.Logging.ContentBlockDumpMaxMB) << 20,
+		ContentBlockDumpKeep:     cfg.Logging.ContentBlockDumpKeep,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -533,6 +547,8 @@ func restartRequiredFields(c *Config) []string {
 	}
 	out = append(out, "session_sticky.ttl", "session_sticky.gc_interval")
 	out = append(out, "logging.request_archive_enabled", "logging.request_retention_days", "logging.request_archive_max_mb")
+	// 内容拦截取证落盘的目录/上限在装配期被 handler 捕获，改动需重启。
+	out = append(out, "logging.content_block_dump_enabled", "logging.content_block_dump_max_mb", "logging.content_block_dump_keep")
 	out = append(out, "server.read_timeout")
 	return out
 }

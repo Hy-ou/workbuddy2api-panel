@@ -13,7 +13,10 @@
     "request_archive_enabled": true,
     "request_retention_days": 7,
     "request_archive_max_mb": 100,
-    "request_client_info": true
+    "request_client_info": true,
+    "content_block_dump_enabled": true,
+    "content_block_dump_max_mb": 8,
+    "content_block_dump_keep": 20
   },
   "cooldown": {
     "soft_rate": "600s",

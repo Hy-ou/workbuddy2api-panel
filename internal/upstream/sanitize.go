@@ -13,6 +13,12 @@ import (
 // sanitizeFeatures 特征预检：任一命中才进入净化（strings.Contains 快速路径，
 // 普通请求全不中 → 原样返回，零分配）。
 var sanitizeFeatures = []string{
+	// DeepSeek Harness 一手 system prompt 指纹（2026-10-27 fingerprint-probe 实测）：
+	// 两条指纹（harness identity 47 B + Web GUI 定向段 221 B，见 sanitizeHarnessRewrites）
+	// 都含 "DeepSeek Harness"，用它做预检标记即可；上游匹配大小写不敏感，故标题形与
+	// 全小写各收一条（agent 把指纹抄进工具参数/代码时多为这两种形态）。
+	"DeepSeek Harness",
+	"deepseek harness",
 	"x-anthropic-billing-header", // header 键值段键名
 	"cc_entrypoint=",             // 尾随裸键值（截断前缀即可命中）
 	"You are Claude Code",        // 身份句（截断前缀即可命中）
@@ -78,6 +84,42 @@ var sanitizeRewrites = [][2]string{
 	},
 }
 
+// sanitizeHarnessRewrites DeepSeek Harness 一手 system prompt 指纹（大小写不敏感正则改写）。
+//
+// 来源与实测（2026-10-27，cmd/fingerprint-probe 直连上游二分定位，同账号 100% 复现）：
+//
+//  1. harness identity 行（dsh-system-prompt 的 `harness:identity`，order -1000）：
+//     "You are an AI agent powered by DeepSeek Harness." —— 最小触发子串 47 B
+//     （到 "Harness" 为止，结尾句号非必需）。上游**大小写不敏感**（全小写一样 400），
+//     且 "You are an AI agent powered by" 与 "DeepSeek Harness" 必须同时在场
+//     （任一半单独 200）。改一个词（powered → running）即断链，语义不变。
+//
+//  2. Web GUI 定向段（dsh-harness-dev-context 的 `app:web-surface`，order 10100）：
+//     221 B 整串逐字命中（"…without naming another target, they mean this GUI."）。
+//     边界紧到结尾的 "GUI."——220 B 前缀（缺句号）200、补上句号 400，两句各自单独 200。
+//     故两处各改一个词（through → via、they mean → that means）双向断链。
+//
+// 为什么是正则而不是 sanitizeRewrites 的字面 ReplaceAll：上游对本族指纹不区分大小写，
+// 而 strings.ReplaceAll 区分——指纹被 agent 抄进工具参数/代码/文件（全小写或大小写混杂）
+// 时字面替换会漏网。代价是命中预检后多几次正则扫描，正常请求零额外开销。
+var sanitizeHarnessRewrites = []struct {
+	re   *regexp.Regexp
+	repl string
+}{
+	{
+		re:   regexp.MustCompile(`(?i)You are an AI agent powered by DeepSeek Harness`),
+		repl: "You are an AI agent running on DeepSeek Harness",
+	},
+	{
+		re:   regexp.MustCompile(`(?i)You are interacting with the user through the DeepSeek Harness Web GUI`),
+		repl: "You are interacting with the user via the DeepSeek Harness Web GUI",
+	},
+	{
+		re:   regexp.MustCompile(`(?i)without naming another target, they mean this GUI\.`),
+		repl: "without naming another target, that means this GUI.",
+	},
+}
+
 // sanitizeText 单段文本净化：预检不中 → 返回原串（零分配）。
 func sanitizeText(text string) string {
 	if !hasFingerprint(text) {
@@ -85,6 +127,10 @@ func sanitizeText(text string) string {
 	}
 	for _, rw := range sanitizeRewrites {
 		text = strings.ReplaceAll(text, rw[0], rw[1])
+	}
+	// DeepSeek Harness 指纹走 (?i) 正则（上游大小写不敏感，见 sanitizeHarnessRewrites）。
+	for _, rw := range sanitizeHarnessRewrites {
+		text = rw.re.ReplaceAllString(text, rw.repl)
 	}
 	if sanitizeHdrRe.MatchString(text) {
 		text = sanitizeHdrRe.ReplaceAllString(text, "")
