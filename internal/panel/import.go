@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,31 +16,144 @@ import (
 
 // cockpitAccount 映射 cockpit tools 导出格式的单个账号。
 type cockpitAccount struct {
-	ID            string `json:"id"`
-	Email         string `json:"email"`
-	UID           string `json:"uid"`
-	Nickname      string `json:"nickname"`
-	AccessToken   string `json:"access_token"`
-	RefreshToken  string `json:"refresh_token"`
-	TokenType     string `json:"token_type"`
-	ExpiresAt     int64  `json:"expires_at"`
-	Domain        string `json:"domain"`
-	DosageNotify  string `json:"dosage_notify_code"`
-	PaymentType   string `json:"payment_type"`
-	Status        string `json:"status"`
-	UsageUpdatedAt int64 `json:"usage_updated_at"`
-	LastCheckin   int64  `json:"last_checkin_time"`
-	CheckinStreak int    `json:"checkin_streak"`
-	CreatedAt     int64  `json:"created_at"`
-	LastUsed      int64  `json:"last_used"`
+	ID             string `json:"id"`
+	Email          string `json:"email"`
+	UID            string `json:"uid"`
+	Nickname       string `json:"nickname"`
+	AccessToken    string `json:"access_token"`
+	RefreshToken   string `json:"refresh_token"`
+	TokenType      string `json:"token_type"`
+	ExpiresAt      int64  `json:"expires_at"`
+	Domain         string `json:"domain"`
+	EnterpriseID   string `json:"enterprise_id"`
+	DeviceToken    string `json:"device_token"`
+	Realm          string `json:"realm"`
+	DosageNotify   string `json:"dosage_notify_code"`
+	PaymentType    string `json:"payment_type"`
+	Status         string `json:"status"`
+	UsageUpdatedAt int64  `json:"usage_updated_at"`
+	LastCheckin    int64  `json:"last_checkin_time"`
+	CheckinStreak  int    `json:"checkin_streak"`
+	CreatedAt      int64  `json:"created_at"`
+	LastUsed       int64  `json:"last_used"`
 }
 
-// importCockpit 接收 cockpit tools 导出的 JSON 文件，批量导入账号到池中。
+// nestedAuthDoc 面板「导出账号」的嵌套形凭证文档（与 auths/workbuddy-*.json 同构）。
+// 导入时兼容单账号对象与批量数组两种形态，避免用户把面板导出文件再导回时被
+// cockpit 扁平格式解析器误判成空字段。
+type nestedAuthDoc struct {
+	Auth struct {
+		AccessToken  string `json:"accessToken"`
+		RefreshToken string `json:"refreshToken"`
+		ExpiresAt    int64  `json:"expiresAt"`
+		Domain       string `json:"domain"`
+		Realm        string `json:"realm"`
+	} `json:"auth"`
+	Account struct {
+		UID          string `json:"uid"`
+		EnterpriseID string `json:"enterpriseId"`
+		Nickname     string `json:"nickname"`
+	} `json:"account"`
+	DeviceToken string `json:"device_token"`
+}
+
+// parseImportAccounts 解析账号导入文件，兼容三种形态：
+//
+//  1. cockpit tools 扁平数组：[{uid, access_token, refresh_token, expires_at(ms), ...}]
+//  2. 面板单账号导出：{auth:{...}, account:{...}, device_token?}
+//  3. 面板批量导出：[{auth:{...}, account:{...}}, ...]
+//
+// 面板导出的嵌套形统一折算成 cockpitAccount（expires_at 转毫秒），后续导入
+// 流程（校验、落盘、签到/激活）完全复用，避免两套逻辑漂移。
+func parseImportAccounts(raw []byte) ([]cockpitAccount, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("empty file")
+	}
+	switch trimmed[0] {
+	case '[':
+		var items []json.RawMessage
+		if err := json.Unmarshal(trimmed, &items); err != nil {
+			return nil, fmt.Errorf("invalid json: %w", err)
+		}
+		if len(items) == 0 {
+			return nil, fmt.Errorf("empty accounts array")
+		}
+		if isNestedAuthDoc(items[0]) {
+			var docs []nestedAuthDoc
+			if err := json.Unmarshal(trimmed, &docs); err != nil {
+				return nil, fmt.Errorf("invalid json: %w", err)
+			}
+			return nestedAuthDocsToCockpit(docs), nil
+		}
+		var accounts []cockpitAccount
+		if err := json.Unmarshal(trimmed, &accounts); err != nil {
+			return nil, fmt.Errorf("invalid json: %w", err)
+		}
+		return accounts, nil
+	case '{':
+		if isNestedAuthDoc(trimmed) {
+			var doc nestedAuthDoc
+			if err := json.Unmarshal(trimmed, &doc); err != nil {
+				return nil, fmt.Errorf("invalid json: %w", err)
+			}
+			return nestedAuthDocsToCockpit([]nestedAuthDoc{doc}), nil
+		}
+		var acc cockpitAccount
+		if err := json.Unmarshal(trimmed, &acc); err != nil {
+			return nil, fmt.Errorf("invalid json: %w", err)
+		}
+		return []cockpitAccount{acc}, nil
+	default:
+		return nil, fmt.Errorf("invalid json: expected a JSON object or array")
+	}
+}
+
+// isNestedAuthDoc 判断一个 JSON 对象是否为面板导出的嵌套形凭证文档。
+// 只看 auth/account 键，避免把 cockpit 扁平对象误判；即便两者都缺，后续
+// 仍会走扁平解析并按缺失字段逐条报错。
+func isNestedAuthDoc(raw []byte) bool {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return false
+	}
+	_, hasAuth := probe["auth"]
+	_, hasAccount := probe["account"]
+	return hasAuth || hasAccount
+}
+
+// nestedAuthDocsToCockpit 把面板导出文档折算成导入路径的扁平账号结构。
+// 面板导出的 expiresAt 是 Unix 秒；导入路径按 cockpit 的毫秒口径除以 1000，
+// 因此这里统一乘 1000（已是毫秒的旧文件不重复放大）。
+func nestedAuthDocsToCockpit(docs []nestedAuthDoc) []cockpitAccount {
+	out := make([]cockpitAccount, 0, len(docs))
+	for _, d := range docs {
+		expiresAt := d.Auth.ExpiresAt
+		if expiresAt > 0 && expiresAt < 1_000_000_000_000 {
+			expiresAt *= 1000
+		}
+		out = append(out, cockpitAccount{
+			UID:          d.Account.UID,
+			Nickname:     d.Account.Nickname,
+			AccessToken:  d.Auth.AccessToken,
+			RefreshToken: d.Auth.RefreshToken,
+			ExpiresAt:    expiresAt,
+			Domain:       d.Auth.Domain,
+			EnterpriseID: d.Account.EnterpriseID,
+			DeviceToken:  d.DeviceToken,
+			Realm:        d.Auth.Realm,
+		})
+	}
+	return out
+}
+
+// importCockpit 接收账号 JSON 文件，批量导入账号到池中。
 //
 //	POST /panel/api/import/cockpit
 //	Content-Type: multipart/form-data
 //	Body: file=<json>
 //
+// 兼容 cockpit tools 扁平数组与面板自身导出的嵌套形（单账号对象 / 批量数组），
 // 返回 {ok, total, imported, skipped, errors}。
 func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseMultipartForm(32 << 20); err != nil {
@@ -59,9 +173,9 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var accounts []cockpitAccount
-	if err := json.Unmarshal(raw, &accounts); err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+	accounts, err := parseImportAccounts(raw)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if len(accounts) == 0 {
@@ -87,10 +201,12 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// 按 domain 推断 realm：workbuddy.ai 家族 → global，否则 cn。
-		realm := auth.ResolveRealm("", acc.Domain)
+		// 显式 realm 优先（面板导出文件带 realm），否则按 domain 推断：
+		// workbuddy.ai 家族 → global，其余 cn。
+		realm := auth.ResolveRealm(acc.Realm, acc.Domain)
 
-		// cockpit tools 的 expires_at 为毫秒时间戳，转为秒。
+		// cockpit tools 的 expires_at 为毫秒时间戳，转为秒；面板导出的嵌套形
+		// 在 nestedAuthDocsToCockpit 中已统一折算成毫秒，这里口径一致。
 		expiresAt := acc.ExpiresAt / 1000
 		if expiresAt <= 0 {
 			expiresAt = time.Now().Add(365 * 24 * time.Hour).Unix()
@@ -107,18 +223,16 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			ExpiresAt:    expiresAt,
 			Domain:       acc.Domain,
 			UID:          uid,
+			EnterpriseID: acc.EnterpriseID,
 			Nickname:     nickname,
+			DeviceToken:  acc.DeviceToken,
 			FilePath:     filepath.Join(p.cfg.AuthDir, fmt.Sprintf("workbuddy-%s.json", uid)),
 		}
 
-		if realm == "global" {
-			if _, err := auth.BackfillRealmFor(a, "global"); err != nil {
-				skipped++
-				errs = append(errs, fmt.Sprintf("uid=%s: set realm failed: %v", uid, err))
-				continue
-			}
-		} else {
-			_, _ = a.BackfillRealm()
+		if _, err := auth.BackfillRealmFor(a, realm); err != nil {
+			skipped++
+			errs = append(errs, fmt.Sprintf("uid=%s: set realm failed: %v", uid, err))
+			continue
 		}
 
 		if err := a.SaveAtomic(); err != nil {

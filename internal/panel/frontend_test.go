@@ -127,7 +127,150 @@ try {
 	}
 }
 
-// 积分扣除维度的格式必须稳定，且缺样本/缺匹配 Token 时不能伪造比例。
+// TestPanelHasBatchExportButton 账号池头部必须有「批量导出」按钮；按钮与
+// app.js 的处理器 id 必须一致，否则点击无反应。
+func TestPanelHasBatchExportButton(t *testing.T) {
+	p := newTestPanel()
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest("GET", "/panel/", nil))
+	body := rec.Body.String()
+	if !strings.Contains(body, `id="btnExportAll"`) {
+		t.Fatal("index.html missing #btnExportAll (批量导出)")
+	}
+	if !strings.Contains(body, "批量导出") {
+		t.Fatal("index.html missing 批量导出 label")
+	}
+}
+
+// TestAppJSAccountExportButton 账号表每行必须有「导出」按钮：data-a=export +
+// data-u=<uid>，点击逻辑据此下载 workbuddy-<uid>.json。
+func TestAppJSAccountExportButton(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; account export button test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('function renderAccounts(list)');
+const end = src.indexOf('// renderModelLocks');
+if (start < 0 || end < 0 || end < start) throw new Error('renderAccounts region not found');
+const tb = { innerHTML: '' };
+const ctx = {
+  Date, Math, Number, String, Boolean, Array, Object, JSON,
+  $: () => tb,
+  esc: s => String(s == null ? '' : s),
+  rateLimitRowsHtml: () => '',
+  dur: () => '0s',
+  ago: () => '—',
+  formatTokenCount: () => '—',
+  formatLatency: () => '—',
+  formatRate: () => '—',
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.renderAccounts = renderAccounts;', ctx);
+ctx.renderAccounts([{
+  uid: 'u-1', nickname: 'n', realm: 'cn', credits: 1, credits_total: 2,
+  success_count: 1, err_total: 0, in_flight: 0, token_usage: {}, last_success: '',
+}]);
+const html = tb.innerHTML;
+process.stdout.write(JSON.stringify({
+  exportBtn: html.includes('data-a="export"'),
+  uid: html.includes('data-u="u-1"'),
+  hint: html.includes('含 token'),
+  batchHandler: src.includes("$('btnExportAll').onclick"),
+}));`
+	f, err := os.CreateTemp(t.TempDir(), "exportbtn-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("account export button node test failed: %v\n%s", err, out)
+	}
+	const want = `{"exportBtn":true,"uid":true,"hint":true,"batchHandler":true}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("account export button=%s want %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestAppJSDownloadHelper download() 必须带 Authorization 取回 blob 并触发
+// <a download="filename">，而不是用无法携带密钥的普通导航。
+func TestAppJSDownloadHelper(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; download helper test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf('async function download(');
+const end = src.indexOf('function toast');
+if (start < 0 || end < 0 || end < start) throw new Error('download region not found');
+const seen = {};
+const anchor = {
+  href: '', download: '', style: {},
+  click() { seen.clicked = (seen.clicked || 0) + 1; },
+  remove() { seen.removed = (seen.removed || 0) + 1; },
+};
+let call = 0;
+const ctx = {
+  LS_KEY: 'wb2api.key',
+  localStorage: { getItem: () => 'test-key' },
+  fetch: async (url, opts) => {
+    call++;
+    seen.url = url; seen.auth = opts.headers.Authorization;
+    const h = call === 1
+      ? { 'Content-Disposition': 'attachment; filename="workbuddy-u-1.json"' }
+      : { 'Content-Disposition': 'attachment; filename="workbuddy-accounts-20261106-001500.json"', 'X-Exported-Count': '6', 'X-Skipped-Count': '1' };
+    return { status: 200, ok: true, headers: { get: n => h[n] || null }, blob: async () => 'blob-bytes' };
+  },
+  URL: {
+    createObjectURL: b => { seen.blob = b; return 'blob:mock'; },
+    revokeObjectURL: u => { seen.revoked = u; },
+  },
+  document: {
+    createElement: () => anchor,
+    body: { appendChild: () => { seen.appended = true; } },
+  },
+  openKey: () => { throw new Error('must not open key dialog'); },
+  setTimeout: fn => fn(),
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + '\nthis.download = download;', ctx);
+(async () => {
+  const single = await ctx.download('accounts/u-1/export', 'workbuddy-u-1.json');
+  const singleName = anchor.download;
+  const batch = await ctx.download('accounts/export');
+  const batchName = anchor.download;
+  process.stdout.write(JSON.stringify({
+    url: seen.url, auth: seen.auth, single, singleName, batch, batchName,
+    href: anchor.href, clicked: seen.clicked, removed: seen.removed, revoked: seen.revoked,
+  }));
+})().catch(e => { console.error(e); process.exit(1); });`
+	f, err := os.CreateTemp(t.TempDir(), "download-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "app.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("download helper node test failed: %v\n%s", err, out)
+	}
+	const want = `{"url":"/panel/api/accounts/export","auth":"Bearer test-key","single":{"filename":"workbuddy-u-1.json","exported":0,"skipped":0},"singleName":"workbuddy-u-1.json","batch":{"filename":"workbuddy-accounts-20261106-001500.json","exported":6,"skipped":1},"batchName":"workbuddy-accounts-20261106-001500.json","href":"blob:mock","clicked":2,"removed":2,"revoked":"blob:mock"}`
+	if strings.TrimSpace(string(out)) != want {
+		t.Fatalf("download helper=%s want %s", strings.TrimSpace(string(out)), want)
+	}
+}
+
+// TestAppJSCreditDimensionFormatting 积分扣除维度的格式必须稳定，且缺样本/缺匹配 Token 时不能伪造比例。
 func TestAppJSCreditDimensionFormatting(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {

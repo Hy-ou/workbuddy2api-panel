@@ -286,6 +286,10 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .rate-limit span { color: var(--ink-2); }
 .acts { display: flex; gap: 5px; justify-content: flex-end; white-space: nowrap; }
 .acts button { padding: 3.5px 8px; font-size: 12.5px; white-space: nowrap; flex: none; }
+/* 账号表操作列有 7 个按钮（签到/余额/任务/暂停选号/禁用/导出/移除）：
+   收紧内边距与间距，让 1440px 视口仍能完整显示「移除」，不必横向滚动。 */
+.acc .acts { gap: 4px; }
+.acc .acts button { padding: 3.5px 6px; }
 
 .empty { padding: 40px 20px; text-align: center; color: var(--ink-3); }
 .empty .big { font-size: 14px; color: var(--ink-2); margin-bottom: 6px; }
@@ -671,6 +675,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <button class="xs" id="btnTravelAll">旅行巡检</button>
           <button class="xs" id="btnActivityAll">活跃上报</button>
           <button class="xs" id="btnKeepaliveAll">全部保活</button>
+          <button class="xs" id="btnExportAll" title="导出全部账号凭证为一个 JSON 文件（含 token，请妥善保管）">批量导出</button>
         </header>
         <div class="tbl-wrap">
         <table class="acc">
@@ -1222,7 +1227,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
       <!-- 导入 JSON -->
       <div id="addTabImport" class="tab-panel" hidden>
-        <div class="hint" style="margin-bottom:8px">选择 cockpit tools 导出的 JSON 文件，批量导入账号。文件需为账号数组格式。</div>
+        <div class="hint" style="margin-bottom:8px">支持 cockpit tools 导出的账号数组，也支持面板「导出」/「批量导出」的凭证 JSON（单个账号或数组）。</div>
         <input type="file" id="importFile" accept=".json" style="margin-bottom:8px">
         <div id="importDone" class="state ok" hidden></div>
         <div id="importErr" class="state err" hidden></div>

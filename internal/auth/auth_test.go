@@ -140,6 +140,94 @@ func TestSaveAtomicPreservesDeviceToken(t *testing.T) {
 	}
 }
 
+// TestExportJSON 导出格式必须与磁盘 auth 文件同构且可被 Parse 原样读回：
+// 面板「一键导出」的 JSON 就是一份可放回 auths/ 的凭证文件。
+func TestExportJSON(t *testing.T) {
+	a := &Auth{
+		AccessToken:  "at-secret",
+		RefreshToken: "rt-secret",
+		ExpiresAt:    1753600000,
+		Domain:       "www.codebuddy.cn",
+		realm:        "cn",
+		UID:          "u1",
+		EnterpriseID: "ent-1",
+		Nickname:     "nick",
+		DeviceToken:  "device-secret",
+	}
+	raw, err := a.ExportJSON()
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(raw) == 0 || raw[len(raw)-1] != '\n' {
+		t.Fatalf("export should end with newline: %q", raw)
+	}
+	b, err := Parse(raw)
+	if err != nil {
+		t.Fatalf("reparse exported json: %v", err)
+	}
+	if b.AccessToken != a.AccessToken || b.RefreshToken != a.RefreshToken ||
+		b.ExpiresAt != a.ExpiresAt || b.Domain != a.Domain {
+		t.Errorf("auth roundtrip mismatch: %+v", b)
+	}
+	if b.UID != a.UID || b.EnterpriseID != a.EnterpriseID || b.Nickname != a.Nickname {
+		t.Errorf("account roundtrip mismatch: %+v", b)
+	}
+	if b.RealmStored() != "cn" {
+		t.Errorf("realm = %q want cn", b.RealmStored())
+	}
+	if b.DeviceToken != "device-secret" {
+		t.Errorf("device_token = %q want device-secret", b.DeviceToken)
+	}
+	// 导出不应依赖 FilePath（池内账号即使来源文件被移动也仍可备份）。
+	if a.FilePath != "" {
+		t.Errorf("test auth should have empty FilePath, got %q", a.FilePath)
+	}
+}
+
+// TestExportDocument 批量导出使用文档快照：字段与 ExportJSON 同源，空 token 报错。
+func TestExportDocument(t *testing.T) {
+	a := &Auth{AccessToken: "at", RefreshToken: "rt", ExpiresAt: 1, UID: "u1", Nickname: "n"}
+	doc, err := a.ExportDocument()
+	if err != nil {
+		t.Fatalf("export document: %v", err)
+	}
+	authDoc, ok := doc["auth"].(map[string]any)
+	if !ok {
+		t.Fatalf("auth doc type = %T", doc["auth"])
+	}
+	if authDoc["accessToken"] != "at" || authDoc["refreshToken"] != "rt" {
+		t.Errorf("auth fields = %+v", authDoc)
+	}
+	acctDoc, ok := doc["account"].(map[string]any)
+	if !ok || acctDoc["uid"] != "u1" {
+		t.Errorf("account fields = %+v", doc["account"])
+	}
+	if _, err := (&Auth{UID: "u2"}).ExportDocument(); err == nil {
+		t.Fatal("want error for empty accessToken")
+	}
+}
+
+// TestExportJSONOmitsEmptyDeviceToken 无设备 token 时不引入空 device_token 键，
+// 与 SaveAtomic 的落盘形状保持一致。
+func TestExportJSONOmitsEmptyDeviceToken(t *testing.T) {
+	a := &Auth{AccessToken: "at", UID: "u1"}
+	raw, err := a.ExportJSON()
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if strings.Contains(string(raw), "device_token") {
+		t.Errorf("empty device token must be omitted, got: %s", raw)
+	}
+}
+
+// TestExportJSONRefusesEmptyAccessToken 空凭证导出必须报错，避免下载一个无法使用的文件。
+func TestExportJSONRefusesEmptyAccessToken(t *testing.T) {
+	a := &Auth{UID: "u1"}
+	if _, err := a.ExportJSON(); err == nil {
+		t.Fatal("want error for empty accessToken")
+	}
+}
+
 // TestLoadDirBackfillsRealm 存量迁移：LoadDir 加载目录时对空 realm 的 auth 自动
 // backfill + SaveAtomic；已有 realm 的保持原值（不被 domain 覆盖）；文件全部带标识。
 func TestLoadDirBackfillsRealm(t *testing.T) {

@@ -315,6 +315,30 @@ func (a *Auth) SaveAtomic() error {
 	if a.FilePath == "" {
 		return fmt.Errorf("no FilePath set")
 	}
+	raw, err := json.MarshalIndent(a.documentLocked(), "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := a.FilePath + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+		// Docker bind-mount 权限问题的典型现场：容器内 app 用户（uid 10001）
+		// 对宿主机挂载目录无写权限。给出可操作指引而不是裸 syscall 错误。
+		msg := fmt.Sprintf("写入 %s 失败: %v", tmp, err)
+		if errors.Is(err, fs.ErrPermission) {
+			msg += "\n（Docker 部署：容器内用户对宿主机挂载目录无写权限。解法任选：" +
+				"1) 以本机 uid 运行容器：PUID=$(id -u) PGID=$(id -g) docker compose up -d；" +
+				"2) sudo chown -R 10001:10001 ./auths ./data ./config.json；" +
+				"3) compose 设 user: \"0:0\" 以 root 运行）"
+		}
+		return errors.New(msg)
+	}
+	return os.Rename(tmp, a.FilePath)
+}
+
+// documentLocked 构造嵌套形凭证文档（磁盘 auth 文件格式，插件 OAuth 亦可读）。
+// 调用方必须已持 a.mu：AccessToken/RefreshToken/ExpiresAt/Domain/realm 会被
+// upstream.RefreshToken 在锁内改写，无锁读取会导出半更新凭证。
+func (a *Auth) documentLocked() map[string]any {
 	doc := map[string]any{
 		"auth": map[string]any{
 			"accessToken":  a.AccessToken,
@@ -334,24 +358,34 @@ func (a *Auth) SaveAtomic() error {
 	if a.DeviceToken != "" {
 		doc["device_token"] = a.DeviceToken
 	}
+	return doc
+}
+
+// ExportDocument 返回与磁盘 auth 文件同构的凭证文档快照（含 accessToken /
+// refreshToken 明文）。调用方必须只在已鉴权通道使用；全程持 a.mu，导出的是
+// 同一时刻的一致凭证快照，避免与 token refresh 并发时拿到半更新字段。
+func (a *Auth) ExportDocument() (map[string]any, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if strings.TrimSpace(a.AccessToken) == "" {
+		return nil, fmt.Errorf("export refused: empty accessToken (uid=%s)", a.UID)
+	}
+	return a.documentLocked(), nil
+}
+
+// ExportJSON 返回与磁盘 auth 文件同构的嵌套形 JSON（缩进 + 末尾换行），供面板
+// 「一键导出账号」直接落盘。内容含 accessToken/refreshToken 明文，调用方必须
+// 只在已鉴权通道返回并禁止缓存。
+func (a *Auth) ExportJSON() ([]byte, error) {
+	doc, err := a.ExportDocument()
+	if err != nil {
+		return nil, err
+	}
 	raw, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	tmp := a.FilePath + ".tmp"
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
-		// Docker bind-mount 权限问题的典型现场：容器内 app 用户（uid 10001）
-		// 对宿主机挂载目录无写权限。给出可操作指引而不是裸 syscall 错误。
-		msg := fmt.Sprintf("写入 %s 失败: %v", tmp, err)
-		if errors.Is(err, fs.ErrPermission) {
-			msg += "\n（Docker 部署：容器内用户对宿主机挂载目录无写权限。解法任选：" +
-				"1) 以本机 uid 运行容器：PUID=$(id -u) PGID=$(id -g) docker compose up -d；" +
-				"2) sudo chown -R 10001:10001 ./auths ./data ./config.json；" +
-				"3) compose 设 user: \"0:0\" 以 root 运行）"
-		}
-		return errors.New(msg)
-	}
-	return os.Rename(tmp, a.FilePath)
+	return append(raw, '\n'), nil
 }
 
 // LoadDir 扫描并解析 dir 下 workbuddy*.json；解析失败的文件静默跳过（启动日志由调用方统计）。

@@ -50,6 +50,42 @@ async function api(path, opts = {}) {
   if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
   return d;
 }
+
+/* download 下载二进制响应（账号凭证 JSON 导出）。
+   不能直接用 <a href>：api_key 存在 localStorage，普通导航带不上 Authorization 头，
+   因此先用 fetch 鉴权取回 blob，再触发浏览器下载。
+   filename 为空时从 Content-Disposition 解析（批量导出由服务端生成带时间戳的文件名）。 */
+async function download(path, filename) {
+  const h = {};
+  const k = localStorage.getItem(LS_KEY);
+  if (k) h['Authorization'] = 'Bearer ' + k;
+  const r = await fetch('/panel/api/' + path, { headers: h });
+  if (r.status === 401) { openKey(); throw new Error('密钥无效或未填写'); }
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    throw new Error(d.error || ('HTTP ' + r.status));
+  }
+  const cd = r.headers.get('Content-Disposition') || '';
+  const m = /filename="?([^";]+)"?/i.exec(cd);
+  const name = filename || (m ? m[1] : 'download.json');
+  const blob = await r.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  // 立即 revoke 在部分浏览器会打断下载，延迟一拍再释放。
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return {
+    filename: name,
+    exported: Number(r.headers.get('X-Exported-Count') || 0),
+    skipped: Number(r.headers.get('X-Skipped-Count') || 0),
+  };
+}
+
 function toast(msg, cls) {
   const el = document.createElement('div');
   el.className = 'tst ' + (cls || '');
@@ -448,6 +484,7 @@ function renderAccounts(list) {
                 : (s.paused ? '<button class="xs primary" data-a="resume" data-u="' + esc(s.uid) + '">恢复选号</button>'
                             : '<button class="xs ghost" data-a="pause" data-u="' + esc(s.uid) + '" title="' + (s.enterprise ? '退出选号，但照常保活 / 刷新额度' : '退出选号，但照常签到 / 活跃上报 / 保活 / 刷新余额') + '">暂停选号</button>')) +
         (s.disabled ? '' : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>') +
+        '<button class="xs ghost" data-a="export" data-u="' + esc(s.uid) + '" title="导出该账号凭证为 JSON 文件（含 token，请妥善保管）">导出</button>' +
         '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>' +
       '</td></tr>';
   }).join('');
@@ -548,6 +585,9 @@ $('accBody').addEventListener('click', async ev => {
       toast('已恢复选号', 'ok');
     } else if (a === 'tasks') {
       openTasks(u);
+    } else if (a === 'export') {
+      const r = await download('accounts/' + encodeURIComponent(u) + '/export', 'workbuddy-' + u + '.json');
+      toast('已导出 ' + r.filename + '（含 token，请妥善保管）', 'ok');
     } else if (a === 'remove') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/remove', { method: 'POST' });
       toast(r.file_error ? '已移除（凭证文件删除失败：' + r.file_error + '）' : '已移除', 'ok');
@@ -571,6 +611,17 @@ $('btnTravelAll').onclick = async () => {
 $('btnActivityAll').onclick = async () => {
   try { await api('activity_all', { method: 'POST' }); toast('活跃上报已开始，结果见日志', 'ok'); }
   catch (e) { toast(e.message, 'err'); }
+};
+$('btnExportAll').onclick = async () => {
+  const b = $('btnExportAll');
+  b.disabled = true;
+  try {
+    const r = await download('accounts/export');
+    const n = r.exported || (overviewData && overviewData.total) || 0;
+    toast('已导出 ' + n + ' 个账号（' + r.filename + '）' +
+      (r.skipped ? '，跳过 ' + r.skipped + ' 个异常账号' : ''), 'ok');
+  } catch (e) { toast(e.message, 'err'); }
+  finally { b.disabled = false; }
 };
 
 /* ── 模型 ─────────────────────────────────────────────────────────── */
