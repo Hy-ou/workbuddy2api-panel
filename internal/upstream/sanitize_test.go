@@ -442,3 +442,19 @@ func newTestUpstream(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(h)
 }
+
+// DeepSeek Harness 指纹 #3（@ 路径引用说明段，407 B 整段逐字命中，2026-11-05 实测）：
+// 上游对整段做逐字匹配，句中改一个词（from → against）即可断链，语义不变。
+func TestHarnessPathRefRewritten(t *testing.T) {
+	in := `Tokens prefixed with @ are paths the user explicitly referenced. Relative paths resolve from the workspace root; absolute paths identify files or directories on the host. A trailing slash marks a directory: list it when its contents matter. Anything else is a file: use the read tool when its contents are needed, and do not claim to have inspected it before reading. @"..." quotes a path containing spaces.`
+	out := sanitizeText(in)
+	if strings.Contains(out, "Relative paths resolve from the workspace root") {
+		t.Errorf("@ path-ref fingerprint not rewritten: %q", out)
+	}
+	if !strings.Contains(out, "Relative paths resolve against the workspace root") {
+		t.Errorf("@ path-ref rewrite should preserve semantics: %q", out)
+	}
+	if !strings.Contains(out, `@"..." quotes a path containing spaces.`) {
+		t.Errorf("@ path-ref tail should be preserved: %q", out)
+	}
+}

@@ -19,6 +19,7 @@ var sanitizeFeatures = []string{
 	// 全小写各收一条（agent 把指纹抄进工具参数/代码时多为这两种形态）。
 	"DeepSeek Harness",
 	"deepseek harness",
+	"Tokens prefixed with @",     // @ 路径引用说明段（2026-11-05 fingerprint-probe 实测，407 B 整段命中）
 	"x-anthropic-billing-header", // header 键值段键名
 	"cc_entrypoint=",             // 尾随裸键值（截断前缀即可命中）
 	"You are Claude Code",        // 身份句（截断前缀即可命中）
@@ -117,6 +118,13 @@ var sanitizeHarnessRewrites = []struct {
 	{
 		re:   regexp.MustCompile(`(?i)without naming another target, they mean this GUI\.`),
 		repl: "without naming another target, that means this GUI.",
+	},
+	{
+		// @ 路径引用说明段（dsh 文件引用提示词，407 B 整段逐字命中；2026-11-05
+		// fingerprint-probe 实测）：把 "resolve from" 改成 "resolve against"（一个词、
+		// 语义不变）即断链。整段较长，用不区分大小写正则覆盖 agent 抄写变体。
+		re:   regexp.MustCompile(`(?i)Relative paths resolve from the workspace root`),
+		repl: "Relative paths resolve against the workspace root",
 	},
 }
 
